@@ -1,0 +1,590 @@
+---
+title: "Estimating the reproductive number of the COVID-19 epidemic in Switzerland"
+author: "Antoine Bourret"
+date: "15/01/2021"
+output: # html_document # html_notebook
+  prettydoc::html_pretty:
+    theme: cayman
+  dev: "pdf"
+params:
+  data: "Switzerland"
+    
+---
+
+```{r setup, include=FALSE,warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+We will estimate the reproductive number of the COVID-19 in Switzerland, denoted $R_t$, which represents the average number of secondary cases caused by the infection of an individual at a particular time $t$. We will use the number of daily new cases to estimate $R_t$, using generalized additive models with smoothing splines. In the following, we denote the reported curve (also called the observed cases) by $\{Y_t\}_{t=1}^T$ and the true incidence curve by $\{I_t\}_{t=1}^T$. These curves are assumed to be discretized in time, and are monitored and estimated on a daily basis. However, these curves are imperfect, as some individuals might be asymptomatic, and are thus not reported as infected. As such, the reported number of cases at some point in time might not be representative of the number of individuals that were infected, due to delay between the infection event and the symptom onset. Thus, we need to deconvolve the incidence curve before estimating $R_t$, that is, estimate the true infection events from the observed ones, given a distribution for the incubation period. This is the first part of this notebook In the second one, we estimate the reproductive number.
+
+## Getting the data
+We use data from the [Federal Office of Public Health](https://www.covid19.admin.ch/en/overview), which are updated every day, including during weekends. Also, here are the libraries that we will need for the analysis:
+
+```{r libraries, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(shinythemes)
+library(openxlsx)
+library(readr)
+library(cowplot)
+library(zoo)
+library(mgcv)
+library(latex2exp)
+library(splines)
+require(stats)
+require(graphics)
+```
+
+```{r theme, include = FALSE}
+source("/Users/Antoine/Desktop/Projet Semestre 2020/CODE/Deconvolution.R")
+source("/Users/Antoine/Desktop/Projet Semestre 2020/CODE/EstimatingRt.R")
+
+lockdown_events <- list("Name" = c("Store & markets closure", "Museums & nightclubs closure", "Hairdresser closure",
+                                   "Restaurants and bar closure", "School closure", "Mask mandatory on public transport", 
+                                   "Restaurants and bar closure", "Extension of restrictions", "Grouping restrictions"),
+                        "Start" = c("2020-03-17", "2020-03-17", "2020-03-17", "2020-03-17", "2020-03-16", "2020-07-06", "2020-12-22", "2020-10-19", "2020-10-29"),
+                        "End" = c("2020-05-10", "2020-06-06", "2020-04-26", "2020-05-10", "2020-05-10", "2021-01-22", "2021-01-22", "2021-01-22", "2021-01-22"),
+                        "level" = c(1, 2, 3, 4, 5, 5, 4, 2, 3))
+settings <- list("country" = "Switzerland", "remove_last_n_observation" = 1, "dim_deconv" = 20, "delta_cst" = 0.0001, "range_legends" = c(2.5,4),
+                 "SIR_pop" = 8.57e6, "SIR_p" = 30, "SIR_q" = 10, "SIR_cst" = TRUE, "SIR_eps" = 0.8, "SIR_first_index" = 8, "Lockdowns" = TRUE)
+
+colors <- c("#00AFBB", "#E7B800", "#FC4E07")
+dark_theme <- FALSE
+if (dark_theme){
+  font_color_plot <- '#1C1E21'
+  points_color <- "grey85"
+  theme_for_the_plots <- theme(plot.background = element_rect(fill = font_color_plot, colour = "black"),
+                               panel.background = element_rect(fill = "#1C1E21", colour = "black"),
+                               panel.grid.major = element_line(colour = "grey85"),
+                               panel.grid.minor = element_line(colour = "grey90"),
+                               legend.position = c(.95, .95),
+                               legend.justification = c("right", "top"),
+                               legend.box.just = "right",
+                               legend.margin = margin(6, 6, 6, 6),
+                               plot.margin = unit(c(1,1,1,1), "cm"),
+                               axis.text = element_text(colour ="white"),
+                               # axis.line = element_line(colour = "white"),
+                               axis.line = element_blank(),
+                               axis.ticks = element_line(colour = "white"),
+                               axis.title = element_text(colour = "white"),
+                               title = element_text(colour = "white"),
+                               legend.background = element_rect(fill = font_color_plot, colour = font_color_plot),
+                               legend.text = element_text(colour ="white"),
+                               legend.key = element_rect(colour = NA, fill = NA))
+  theme_shiny <- shinytheme('slate')
+}else{
+  font_color_plot <- "white"
+  points_color <- "black"
+  theme_for_the_plots <- theme(plot.background = element_rect(fill = font_color_plot),
+                               panel.background = element_rect(fill = "white", colour = "black"),
+                               panel.grid.major = element_line(colour = "grey85"),
+                               panel.grid.minor = element_line(colour = "grey90"),
+                               legend.position = c(.95, .95),
+                               legend.justification = c("right", "top"),
+                               legend.box.just = "right",
+                               legend.margin = margin(6, 6, 6, 6),
+                               plot.margin = unit(c(1,1,1,1), "cm"),
+                               legend.key = element_rect(colour = "transparent", fill = "transparent"))
+  theme_shiny <- shinytheme('paper')
+}
+```
+
+```{r load data functions, include = FALSE}
+# Function to get the data for the corresponding country, including the daily number of infected, recovered and deaths
+#' @param country country for which the data need to be collected
+#' @param option 1 to get the data from bag.admin.ch (only for Switzerland), 2 for another source
+#' @param plot_ TRUE to plot the collected data
+ConstructDataset <- function(country, option = 1, plot_ = F){
+  
+  # -------------- Some functions --------------
+  # Function to get the recovered cases for the corresponding country
+  #' @param country country for which the data need to be collected
+  getRecovered <- function(country){
+    if (country == "United States"){
+      country <- "US"
+    }
+    data_recovered <- as.data.frame(read_csv(file = "https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_recovered_global.csv&filename=time_series_covid19_recovered_global.csv"))
+    data_recovered_matrix <- data.matrix(data_recovered[5:length(data_recovered[1,])])
+    # print(data_recovered[,2])
+    
+    l <- length(data_recovered[1, 5:length(data_recovered[1,])])
+    
+    data_country <- data.frame(matrix(ncol = 3, nrow = l))
+    colnames(data_country) <- c("Date", "recovered", "new_recovered")
+    
+    data_country$Date <- as.Date(colnames(data_recovered)[5:length(data_recovered[1,])], "%m/%d/%y")
+    
+    if (length(which(data_recovered[,2] == country)) <= 1){
+      data_country$recovered <- data_recovered_matrix[which(data_recovered[,2] == country),]
+    }else{
+      data_country$recovered <- colSums(data_recovered_matrix[which(data_recovered[,2] == country),])
+    } 
+    data_country$new_recovered <- data_country$recovered - c(0, data_country$recovered[1:(l-1)])
+    
+    return(data_country)
+  }
+  
+  # Function to collected the data from the bag.admin API
+  BAGData <- function(){
+    data <- read.xlsx(sep=",",startRow = 8, detectDates = TRUE,
+                      "https://www.bag.admin.ch/dam/bag/de/dokumente/mt/k-und-i/aktuelle-ausbrueche-pandemien/2019-nCoV/covid-19-datengrundlage-lagebericht.xlsx.download.xlsx/200325_Datengrundlage_Grafiken_COVID-19-Bericht.xlsx")
+    names(data) <- c("date","cases","casesCumul","hospitalized","hospitalizedCumul",
+                     "deaths","deathsCumul")
+    return(data)
+  }
+  
+  # Function to make a data frame of the infected, deaths and recovered cases for the chosen country, from data.humdata
+  #' @param country country for which the data need to be collected
+  prepare_data <- function(country){
+    data_confirmed <- as.data.frame(read_csv(file = "https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_confirmed_global.csv&filename=time_series_covid19_confirmed_global.csv"))
+    data_deaths <- as.data.frame(read_csv(file = "https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_deaths_global.csv&filename=time_series_covid19_deaths_global.csv"))
+    data_recovered <- as.data.frame(read_csv(file = "https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_recovered_global.csv&filename=time_series_covid19_recovered_global.csv"))
+    
+    data_confirmed_matrix <- data.matrix(data_confirmed[5:length(data_confirmed[1,])])
+    data_deaths_matrix <- data.matrix(data_deaths[5:length(data_deaths[1,])])
+    data_recovered_matrix <- data.matrix(data_recovered[5:length(data_recovered[1,])])
+    
+    l <- length(data_confirmed[1, 5:length(data_confirmed[1,])])
+    
+    data_country <- data.frame(matrix(ncol = 7, nrow = l))
+    colnames(data_country) <- c("Date", "confirmed", "deaths", "recovered", "new_confirmed", "new_deaths", "new_recovered")
+    
+    print(colnames(data_confirmed)[5:length(data_confirmed[1,])])
+    data_country$Date <- as.Date(colnames(data_confirmed)[5:length(data_confirmed[1,])], "%m/%d/%y")
+    # data_country$Date <- colnames(data_confirmed)[5:length(data_confirmed[1,])]
+    
+    if (length(which(data_deaths[,2] == country)) <= 1){
+      data_country$confirmed <- data_confirmed_matrix[which(data_confirmed[,2] == country),]
+      data_country$deaths <- data_deaths_matrix[which(data_deaths[,2] == country),]
+      data_country$recovered <- data_recovered_matrix[which(data_recovered[,2] == country),]
+    }else{
+      data_country$confirmed <- colSums(data_confirmed_matrix[which(data_confirmed[,2] == country),])
+      data_country$deaths <- colSums(data_deaths_matrix[which(data_deaths[,2] == country),])
+      data_country$recovered <- colSums(data_recovered_matrix[which(data_recovered[,2] == country),])
+    }
+    
+    data_country$new_confirmed <- data_country$confirmed - c(0, data_country$confirmed[1:(l-1)])
+    data_country$new_deaths <- data_country$deaths - c(0, data_country$deaths[1:(l-1)])
+    data_country$new_recovered <- data_country$recovered - c(0, data_country$recovered[1:(l-1)])
+    
+    # par(mfrow = c(2,3))
+    # plot(data_country$Date, data_country$confirmed, type = 'l')
+    # plot(data_country$Date, data_country$deaths, type = 'l')
+    # plot(data_country$Date, data_country$recovered, type = 'l')
+    # plot(data_country$Date, data_country$new_confirmed, type = 'l')
+    # plot(data_country$Date, data_country$new_deaths, type = 'l')
+    # plot(data_country$Date, data_country$new_recovered, type = 'l')
+    
+    d1 <- which(data_country$confirmed!=0)
+    d2 <- which(data_country$deaths!=0)
+    d3 <- which(data_country$recovered!=0)
+    date_first_not_0 <- intersect(d1, d2)[1]
+    
+    return(list(data_country, date_first_not_0))
+  }
+  
+  # Function to replace the NA and negative values by 0 values
+  removeNA <- function(x){
+    x[which(is.na(x))] <- 0
+    x[which(x < 0)] <- 0
+    return(x)
+  }
+  
+  # Function to plot the collected data
+  #' @param DAT dataframe of the data
+  plot_data <- function(DAT, obs, title_, points_color = "black", moving_average_window = 7, smooth = FALSE){
+    plot_of_data <- ggplot(data = DAT, aes(x = Date, y = obs)) + geom_line(color = points_color) + 
+      labs(title=title_, x="Time", y="count") + 
+      theme_for_the_plots
+    if (smooth){
+      plot_of_data <- plot_of_data + geom_line(aes(y = rollapply(obs, 
+                                                                 width=moving_average_window, FUN=function(x) mean(x, na.rm=TRUE), 
+                                                                 by=1, by.column=TRUE, partial=TRUE, fill=NA, align="center")), 
+                                               color = colors[3], size=0.8)
+    }
+    return(plot_of_data)
+  }
+  # --------------------------------------------
+  
+  # Collect data depending on the option
+  if (option == 1){
+    data <- BAGData()
+    data_cases <- data$cases
+    data_dates <- data$date
+    data_deaths <- data$deaths
+    data_dates <- data$date
+    
+  }else if (option == 2){
+    data <- as.data.frame(read_csv("https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/owid-covid-data.csv"))
+    # Select data 
+    data_c <- data[which(data[,"location"] == country), ]
+    
+    # Some preprocessing, remove first zeros
+    first_value = 1
+    data_c$new_cases <- removeNA(data_c$new_cases)
+    while(data_c$new_cases[first_value] < 1){ first_value = first_value+1 }
+    data_c <- data_c[first_value:length(data_c$date),]
+    data_c$new_cases[which(data_c$new_cases < 1)] <- 1
+    
+    data_cases <- data_c$new_cases
+    data_deaths <- data_c$new_deaths
+    data_dates <- data_c$date
+    
+  }else if (option == 3){
+    data <- prepare_data(country)
+    
+    return(data)
+  }
+  
+  data_rec <- getRecovered(country)
+  inter_dates <- as.Date(intersect(data_dates, data_rec$Date))
+  data_deaths <- removeNA(data_deaths)
+  data_cases <- removeNA(data_cases)
+  data_rec$new_recovered <- removeNA(data_rec$new_recovered)
+  
+  # Put all data into a data frame
+  data_country <- data.frame(matrix(ncol = 7, nrow = length(inter_dates)))
+  colnames(data_country) <- c("Date", "confirmed", "deaths", "recovered", "new_confirmed", "new_deaths", "new_recovered")
+  data_country$Date <- inter_dates
+  data_country$new_confirmed <- data_cases[which(data_dates %in% inter_dates)]
+  data_country$new_deaths <- data_deaths[which(data_dates %in% inter_dates)]
+  data_country$new_recovered <- data_rec$new_recovered[which(data_rec$Date%in%inter_dates)]
+  data_country$confirmed <- cumsum(data_country$new_confirmed)
+  data_country$deaths <- cumsum(data_country$new_deaths)
+  data_country$recovered <- cumsum(data_country$new_recovered)
+  
+  if (plot_){
+    plot_new_confirmed <- plot_data(data_country, data_country$new_confirmed, paste("New confirmed cases (",country, ")" ))
+    plot_new_deaths <- plot_data(data_country, data_country$new_deaths, paste("New deaths (",country, ")" ))
+    plot_new_recovered <- plot_data(data_country, data_country$new_recovered, paste("New recovered cases (",country, ")" ))
+    
+    plot_Total_confirmed <- plot_data(data_country, data_country$confirmed, paste("Total confirmed cases (",country, ")" ))
+    plot_Total_deaths <- plot_data(data_country, data_country$deaths, paste("Total deaths (",country, ")" ))
+    plot_Total_recovered <- plot_data(data_country, data_country$recovered, paste("Total recovered cases (",country, ")" ))
+    
+    # plot(plot_new_confirmed)
+    plot_general <- plot_grid(plot_new_confirmed, plot_new_deaths, plot_new_recovered, 
+                              plot_Total_confirmed, plot_Total_deaths, plot_Total_recovered, nrow = 2)
+    plot(plot_general)
+    
+  }
+  
+  return(data_country)
+}
+
+# Function to replace the NA and negative values by 0 values
+removeNA <- function(x){
+  x[which(is.na(x))] <- 0
+  x[which(x < 0)] <- 0
+  return(x)
+}
+
+# Function that redistributes the total cases for sunday, saturday and monday equally on these 3 days
+#' @param cases vector of new cases
+#' @param dates vector of dates, of class Dates
+reDistributeMondayCases <- function(cases, dates){
+  weekdays_ <- weekdays(dates)
+  indices_ <- c(1:length(dates))[weekdays_ %in% c("Monday")]
+  cases_reworked <- cases
+  for (j in 1:length(indices_)){
+    index_set_week <- c((indices_[j]-2):indices_[j])
+    index_set_week <- index_set_week[which(index_set_week >= 1)]
+    mean_weekend_and_monday <- mean(cases[index_set_week])
+    cases_reworked[index_set_week] <- mean_weekend_and_monday
+  }
+  return(cases_reworked)
+}
+
+# Function to plot the result
+plot_country <- function(extension_results, indices_, times = NULL, extra = NULL, ...){
+  if (is.null(times)){
+    times <- extension_results$DATA$time
+  }
+  
+  plot_final <- ggplot(data = NULL, aes(x = times))
+  if (!is.null(extra)){
+    plot_final <- plot_final + geom_line(aes(y = extra), alpha = 0.8, color = "gray")
+  }
+  plot_final <- plot_final + geom_vline(xintercept = times[length(indices_)], color = "red") + 
+    geom_ribbon(aes(ymin = extension_results$extension_results$lower, 
+                    ymax = extension_results$extension_results$upper, 
+                    fill = "Confidence interval extension", colour = NA), alpha = 0.3, fill = colors[3]) +
+    geom_line(aes(y = extension_results$extension_results$fitted, colour = "extension"), size = 0.7) + 
+    geom_segment(aes(x = times[length(indices_)], y = 0, xend = times[length(extension_results$DATA$time)], yend = 0), 
+                 color = "#e63946", arrow = arrow(length = unit(0.2, "cm"))) + 
+    geom_text(data=NULL, aes(x= times[length(indices_)] + (times[length(extension_results$DATA$time)] - times[length(indices)])/2, y = 0, 
+                             label = "Prediction"), colour = "#e63946", vjust = 1.5, size = 3) + 
+    
+    scale_fill_manual("", 
+                      breaks = c("Confidence interval extension", "deconvolution", "Simlutaneous confidence bands"),
+                      values = c("#e63946", colors[2], colors[2])) +
+    scale_colour_manual("", 
+                        breaks = c('observed incidence', "cases", "extension", "deconvolution"),
+                        values = c("black", "#1d3557", "#364958",  colors[2])) +
+    
+    labs(...) + 
+    theme_for_the_plots + 
+    guides(color=guide_legend(override.aes=list(fill=NA))) + theme(legend.position = 'bottom') + 
+    coord_cartesian(ylim = c(0, 1.2*max(extension_results$DATA$cases, na.rm = TRUE)))
+  
+  if (!is.null(times)){
+    plot_final <- plot_final + scale_x_date(date_breaks = "1 month", date_labels = "%b")
+  }
+  
+  return(plot_final)
+}
+```
+
+Now we can load the data. We use the function `ConstructDataset`, and take infection events from March to December 2020. 
+
+```{r load_data, warning=FALSE, message=FALSE}
+swiss_data <- ConstructDataset("Switzerland")
+
+data_cases <- swiss_data$new_confirmed   # new confirmed cases
+data_dates <- swiss_data$Date   # list of dates 
+indices <- c(1:303)   # we take only data from March to December 2020
+```
+
+```{r load data other settings, include=FALSE}
+# List of measures, for the plots 
+space <- (settings$range_legends[2] - settings$range_legends[1])/(length(lockdown_events$Name)-1)
+lockdown_data <- data.frame(x=as.Date(lockdown_events$Start), y=seq(settings$range_legends[1], settings$range_legends[2], space), 
+                            vx=as.Date(lockdown_events$End), vy=seq(settings$range_legends[1], settings$range_legends[2], space),
+                            name = lockdown_events$Name, ymin = rep(0, length(lockdown_events$Start)), ymax = rep(max(settings$range_legends), length(lockdown_events$Start)))
+
+if (!is.null(lockdown_events$level)){
+  lockdown_data$y <- settings$range_legends[1] +  (settings$range_legends[2] - settings$range_legends[1]) / length(unique(lockdown_events$level)) * lockdown_events$level
+  lockdown_data$vy <- lockdown_data$y
+}
+
+# to replicate plots of the report:
+indices <- c(1:303)
+```
+
+Below is a plot of the incidence curve, to get an idea of the type of data we are dealing with. We can distinguish the two epidemiological waves, and most importantly a strong weekly pattern, characterized by a drop of reported cases during the weekends. We also add a small extension of 20 days at the end. This will be usefull for the deconvolution part.
+
+```{r, dpi=300}
+prediction_window <- 20
+
+# Infection events:
+extensionSwiss <- extension_prediction(data_cases[indices], 
+                                       extension = list('len' = prediction_window, 
+                                                        'family' = nb(link = 'log'), 
+                                                        'keep_original' = TRUE, 
+                                                        'min_weights' = 0.1), 
+                                       fm = "cases ~ s(time, k = 100, bs = \'tp\', m = c(0, 1)) + s(day, k = 5)")
+
+# Plot of the incidence curve
+infected_plot <- plot_country(extensionSwiss, indices, title="New infected", x="time", y="number cases", 
+                              times = seq.Date(data_dates[1], as.Date(data_dates[length(indices)]) + prediction_window, by = "1 day"))
+infected_plot
+
+```
+
+## Deconvolution of the incidence curve
+
+For the deconvolution, we assume that the observed event $Y_t+1$ follows, conditionally on the incidence events $I_1, \ldots, I_t$, a Poisson distribution with a weighted sum of these incidence events. More formally, we assume that $Y_{t+1} | I_1, \ldots, I_{t} \sim \text{Pois}(\mu_{t+1})$, with $\mu_{t+1} = \sum_{s=1}^K {w_s I_{t+1-s}}$. The distribution $F$ of the incubation period is taken as known ($F(s) = w_s$). In a vectorized form, we can define $I = \{I_t\}_{t=1}^{T} \in \mathbb{R}^T$ to be the vector of incidence events, and $\mu = [\mu_1, \ldots, \mu_T]^T \in \mathbb{R}^T$ the vector of mean of the Poisson random vector. Then, according to the definition of the model, we have that $B I = \mu$, with the incubation period matrix
+$$
+B = 
+\begin{bmatrix}
+w_1 & & & & \\
+\vdots & \ddots & & 0 & \\
+w_K & \ldots & w_1 & & \\
+ & \ddots& & \ddots & \\
+0 & & w_K & \ldots& w_1\\
+\end{bmatrix}
+\in \mathbb{R}^{T \times T}.
+$$
+For the incubation period, we can use estimates from [Lauer et al.](https://doi.org/10.7326/M20-0504), with a mean of 5.1 days and 95% confidence interval 4.1-5.8 days. We use a discretized gamma distribution:
+
+```{r}
+# Incubation period distribution:
+shape_w_conv <- 10.2
+scale_w_conv <- 0.5
+w_conv<- discrete_gamma(shape = shape_w_conv, scale = scale_w_conv)
+
+```
+
+The parameters $\{I_t\}_{t=1}^{T}$ can then be estimated by maximizing the log likelihood, using the conjugate gradient descent or the Broyden-Fletcher-Goldfarb-Shanno (BFGS) algorithm. However, this implies that there are as many parameters as there are variables, which can in practice lead to unstable estimates. Thus, we assume that the true incidence curve is a smooth function of time, that we will model using spline functions. Formally, we set $I = Z\gamma$, where $Z$ is the spline basis matrix in $\mathbb{R}^{T \times q}$ and $\gamma$ are the parameters associated with the spline basis, in $\mathbb{R}^q$. The only parameters to be estimated are the $\gamma$, with $B Z \gamma = \mu$. This is of generalized additive form, and we can use the `gam` function from the `mgcv` package to estimate the parameters. 
+
+The update rule for the parameters is 
+$$
+    \gamma_{\lambda}^{k+1} = \left( (BZ)^T W BZ + \lambda\Delta \right)^{-1} (BZ)^T W (BZ \gamma_{\lambda}^k + (Y - BZ\gamma_{\lambda}^k)/BZ\gamma^k)
+$$
+with $W = \text{diag}(BZ\gamma^k)$ the diagonal matrix in $\mathbb{R}^{T\times T}$, which depends on the current estimate of the parameters. $B$ corresponds to the incubation period matrix. The term $\Delta$ is a penalization matrix, which is here tridiagonal. We can chose the $\lambda$ parameter and the basis dimension $q$ with cross-validation, which are carried by the two functions below `findBestDimension` and `findBestLambda`. To allow for overdispersion, we use a quasi-Poisson model.
+
+```{r deconvolution computation, results='hide', warning=FALSE, message=FALSE}
+# 
+# First, we add some values set to 1 before the beginning of the epidemic, so that the spline functions do not have too much variability during the initial phase
+extension_first_length <- 20    
+indices_extension_start <- c(c(1:extension_first_length), extension_first_length + indices)
+data_cases_extension_start <- c(rep(1, extension_first_length), data_cases)
+new_dates <- seq.Date(data_dates[1] - extension_first_length, length=length(indices) + extension_first_length, by= '1 day')
+original_indices_translated <- extension_first_length + indices
+
+# Now we search for the best basis dimension, as well as the best penalization based on the chosen dimension
+dimensionBasis <- findBestDimension(data_cases_extension_start[indices_extension_start],   # observed data
+                                    prob_vector = w_conv,  # incubation period
+                                    family = quasipoisson(link = 'log'), # family for the GAM
+                                    smoothing = 7, # smoothing window for the observation
+                                    extension = list('len' = 40, 'family' = nb(link = 'log'), 'keep_original' = TRUE, 'min_weights' = 0.1),  # extension parameters
+                                    range_values = c(30:150),  # values for the grid search
+                                    diagnostic_plot = FALSE,   # TRUE to show the score for each values of the basis dimension
+                                    fm = "cases ~ s(time, k = 50, bs = \'tp\', m = c(0, 0)) + s(day, k = 5)")  # the formula for the extension
+
+lambda_delta <- findBestLambda(data_cases_extension_start[indices_extension_start], # observed data
+                               k_spline = dimensionBasis,    # basis dimension
+                               prob_vector = w_conv,  # incubation period
+                               range_values = 10**(20:-10),  # values for the grid search
+                               family = quasipoisson(link = 'log'), # family for the GAM
+                               smoothing = 7,  # smoothing window for the observation
+                               extension = list('len' = 40, 'family' = nb(link = 'log'), 'keep_original' = TRUE, 'min_weights' = 0.1),  # extension parameters
+                               diagnostic_plot = FALSE,   # TRUE to show the score for each values of the basis dimension
+                               fm = "cases ~ s(time, k = 50, bs = \'tp\', m = c(0, 0)) + s(day, k = 5)")   # the formula for the extension
+  
+# Once the best lambda is found, we construct the regularization matrix Delta
+delta <- construct_delta(dimensionBasis + 4)
+delta <- lambda_delta * delta
+
+# Here is the function to estimate the true incidence events
+results_IWLS_extended <- DeconvolutionGAM(data_cases_extension_start[indices_extension_start], 
+                                          w_conv, 
+                                          dimensionBasis, 
+                                          plot_ = FALSE, 
+                                          delta = delta,
+                                          get_derivatives = FALSE, 
+                                          family = quasipoisson(link = 'log'),
+                                          extension = list('len' = 40, 'family' = nb(link = 'log'), 'keep_original' = TRUE, 'min_weights' = 0.1),
+                                          fm = "cases ~ s(time, k = 100, bs = \'tp\', m = c(0, 1)) + s(day, k = 5)")
+
+# We compute here the confidence bands (point-wise and simultaneous)
+ConfidenceBands_extended <- SimultaneousIntervals(results_IWLS_extended$SplineBasis, 
+                                                  plot_ = TRUE,
+                                                  coefficients_model = results_IWLS_extended$fit$coefficients,
+                                                  CovMatrix = vcov(results_IWLS_extended$fit),
+                                                  sample_splines = TRUE, 
+                                                  ilink_fct = family(results_IWLS_extended$fit)$linkinv, 
+                                                  N_keep = 100)
+```
+
+```{r}
+sprintf("One parameter approximately every %.3f days", length(data_cases_extension_start[indices_extension_start])/dimensionBasis)
+```
+
+
+And here are the estimated true incidence events:
+
+```{r deconvolution, dpi=300, include = TRUE, warning=FALSE, error=FALSE}
+
+plot_deconvolution <- ggplot(data = NULL, aes(x = new_dates[original_indices_translated], y = data_cases_extension_start[original_indices_translated], colour = "Observed new cases")) + geom_line() + 
+  geom_ribbon(aes(ymin = ConfidenceBands_extended$Point_wise_CI_lower[original_indices_translated], ymax = ConfidenceBands_extended$Point_wise_CI_upper[original_indices_translated], fill = "Point-wise confidence bands", colour = NA), alpha = 0.3, fill = colors[3]) +
+  geom_ribbon(aes(ymin = ConfidenceBands_extended$Simultaneous_lower[original_indices_translated], ymax = ConfidenceBands_extended$Simultaneous_upper[original_indices_translated], fill = "Simlutaneous confidence bands", colour = NA), alpha = 0.3, fill = colors[3]) +
+  geom_line(aes(y = results_IWLS_extended$fitted_values[original_indices_translated], colour = 'Deconvolution')) + 
+  scale_colour_manual("", 
+                      breaks = c("incidence", 'Observed new cases', 'Deconvolution', "Point-wise confidence bands", "Simlutaneous confidence bands"),
+                      values = c("black", "black", colors[3], colors[3], colors[3])) +
+  scale_fill_manual("", 
+                    breaks = c("Point-wise confidence bands", "Simlutaneous confidence bands"),
+                    values = c(colors[3], colors[3])) +
+  labs(title=paste("Deconvolution, ", settings$country), x="Time", y="number of new cases", subtitle = latex2exp::TeX(paste("$q = ", dimensionBasis, "$ and $\\lambda = ", lambda_delta, "$"))) + 
+  theme_for_the_plots + 
+  coord_cartesian(ylim = c(0, 1.1 * max(data_cases)), xlim = c(data_dates[1], as.Date("2021-01-22"))) + 
+  guides(color=guide_legend(override.aes=list(fill=NA))) + 
+  theme(legend.position="bottom") + 
+  scale_x_date(date_breaks = "1 month", date_labels = "%b") 
+
+plot_deconvolution
+```
+
+
+```{r, include = FALSE}
+Swiss_deconvolution <- results_IWLS_extended$fitted_values[original_indices_translated]
+results_deconvolution <- results_IWLS_extended
+condidence_bands <- ConfidenceBands_extended
+indices_used <- original_indices_translated
+```
+
+
+## Estimating $R_t$
+
+Analogously to the deconvolution step, we estimate $R_t$ with spline functions. In our model, we assume that the mean number of newly infected individuals at time $t$ is a weighted average of the new infected individuals at previous time step, multiplied by some quantity $R_t$ that varies across time. More formally, let $I_t$ be the incidence curve for time step $t = 1, \ldots, T$, and let $\{\tilde{w}_j\}_{j=1}^{K}$ be the infectivity profile, which is different from the incubation period that we introduced earlier. We suppose that each $I_t$ is Poisson distributed, with mean 
+$$
+    \mu_t = R_t \sum_{j=1}^{K}\tilde{w}_j I_{t-j} = \exp \left[ \log(R_t) + \log \left (\sum_{j=1}^{K}\tilde{w}_j I_{t-j} \right ) \right ],
+$$
+where the generation interval is assumed to be known. As such, the second term in the exponential (the offset) can be explicitly computed, and the only unknown is the log of the reproductive number. In order to estimate this, we suppose that $\log(R_t)$ is smoothed over the time, that is,
+$$
+    \log(R_t) = \sum_{i = 1}^{q_1}\beta_j B_j(t),
+$$
+where $B = \{B_1,\ldots,B_{q_1}\}$ is a spline basis of dimension $q_1$, defined over the interval $[0, T]$.
+
+For the generation intervals, we can use estimates from [Tapiwa et al.](https://www.medrxiv.org/content/early/2020/03/08/2020.03.05.20031815), with a mean of 5.2 days (95%CI 3.78-6.78) and standard deviation 1.72 (95%CI 0.91-3.93):
+```{r generation intervals}
+# The genration interval
+W_gam <- discrete_normal()$prob_vector
+```
+
+Here is the code to estimate $R_t$ using spline functions. We first compute the offset values and the weights. These weights are computed based on the variance of the estimated incidence events (from the deconvolution step), so that observations with large variance (and confidence bands) are less reliable and should then have their impact reduced in the fitting routine. This is controled by the parameter `weights` in the `gam` function. We multiply the weights with the square root of the fitted values in order to balance the use of a quasi-Poisson model in the deconvolution, which allowed to have a variance that is a linear function of the mean (but not equal to the mean, as it is assumed for a Poisson model).
+
+```{r estimatingR}
+# These are the offset values
+offsetValues_IWLS <- convolve(c(0* 1:(length(W_gam)-1), Swiss_deconvolution), rev(W_gam), type = "filter")
+offsetValues_IWLS[which(offsetValues_IWLS <= 0)] <- 1
+
+# Weights for the fit
+weights <- abs(condidence_bands$Point_wise_CI_upper[indices_used] - condidence_bands$Point_wise_CI_lower[indices_used])/4  # get standard errors from CI
+weights <- weights**2
+weights <- weights /sqrt(results_deconvolution$fitted_values[indices_used])
+weights <- 1/weights
+weights <- weights/mean(weights)
+
+# Data frame containing the response variable, the offset and the time indices
+DAT_IWLS <- data.frame(resp = results_deconvolution$fitted_values[indices_used], offs = offsetValues_IWLS, x = c(1:length(results_deconvolution$fitted_values[indices_used])))
+
+# We fit the model, using a negative binomial model and a basis dimension of 70
+fit_IWLS <- fitModel(DAT_IWLS, 
+                     which_model = nb(link = "log"),   # negative binomial model with log link function
+                     weights_ = weights,               # weights for the P-IWLS algorithm
+                     fm = 'resp ~ s(x, k = 70)',       # basis dimension: 70
+                     ignore_first_max = 10,            # for the plots, we ignore first 10 largest values
+                     deriv_plots = c(0,1),             # we compute the fitted values (R_t) and its derivative
+                     detect_flat = TRUE,               # plot option
+                     axis_x = data_dates[indices])     # plot option
+```
+
+And here are the estimates for $R_t$ (top panel), along with its first derivative (bottom panel), which is computed using a finite difference scheme. The estimate is shown by the solid yellow curve, with in light red the point-wise and simultaneous confidence intervals. The solid black curves are splines curves sampled from the estimates of the parameters of the model. The grey regions correspond to period where the critical threshold (either 1 for the fitted values in (top), or 0 for the derivatives in (bottom)) is between the confidence bands. The main restrictive measures are shown with dashed vertical lines, so as to assess their effectiveness.
+
+```{r plotsR, include=FALSE, dpi=300, warning=FALSE, error=FALSE, fig.height=10, fig.width=10}
+plot_estim_r <- fit_IWLS$derivPlots$list_plots[[1]] + 
+  labs(title = "", y = latex2exp::TeX(paste("Estimates of", "$R_t$")), x = "time") +
+  coord_cartesian(ylim = c(0, 4.2)) +
+  geom_segment(data=lockdown_data, mapping=aes(x=x, y=y, xend=vx, yend=vy), color="black") +
+  geom_vline(data=lockdown_data,aes(xintercept=x), color = 'black', linetype = "dashed", alpha = 0.8) +
+  geom_vline(data=lockdown_data,aes(xintercept=vx), color = 'black', linetype = "dashed", alpha = 0.8) +
+  geom_point(data=lockdown_data, mapping=aes(x=x, y=y), size=2, color="black") +
+  geom_point(data=lockdown_data, mapping=aes(x=vx, y=vy), size=2, color="black") + 
+  geom_vline(data = NULL, aes(xintercept = as.Date("2020-06-22")), color = "red",linetype = "dashed", alpha = 0.8) + 
+  geom_text(data=lockdown_data, aes(x=as.Date(lockdown_events$Start) + floor((as.Date(lockdown_events$End)-as.Date(lockdown_events$Start))/2), 
+                                    y= y, label = name), colour = "black", vjust = -0.5, size = 4) + 
+  theme(plot.margin = unit(c(0.5, 1, 0, 1), "cm"))
+
+plot_estim_r_deriv <- fit_IWLS$derivPlots$list_plots[[2]] + 
+  labs(title = "", y = latex2exp::TeX(paste("Estimated first derivative of", "$R_t$")), x = "time") +
+  coord_cartesian(ylim = c(-0.2, 0.2)) +
+  geom_vline(data=lockdown_data,aes(xintercept=x), color = 'black', linetype = "dashed", alpha = 0.8) +
+  geom_vline(data=lockdown_data,aes(xintercept=vx), color = 'black', linetype = "dashed", alpha = 0.8) + 
+  geom_point(data=lockdown_data, mapping=aes(x=x, y=y/20), size=0.002, color="black") +
+  geom_point(data=lockdown_data, mapping=aes(x=vx, y=vy/20), size=0.002, color="black") +
+  geom_vline(data = NULL, aes(xintercept = as.Date("2020-06-22")), color = "red",linetype = "dashed", alpha = 0.8) + 
+  theme(plot.margin = unit(c(0.5, 1, 0.5, 1), "cm"))
+```
+
+```{r, dpi=300, warning=FALSE, error=FALSE, fig.height=10, fig.width=10}
+plot_grid(plot_estim_r, 
+          plot_estim_r_deriv, 
+          nrow = 2, align = 'hv')
+```
+
+The estimates of $R_t$ show that the first sanitary measures had an impact on the reproductive number for COVID-19 in Switzerland, which broke down the critical threshold of 1 nearly one week after the implementation of the measures, on March 23, 2020 (with 95\% CI March 21 - March 26). 
+During the first weeks of March 2020, values for $\hat{R}_t$ are quite high, and may suffer from a lack of observations. 
+$\hat{R}_t$ then stayed under 1 for more than two months, gradually increasing after the restrictive measures have ceased to be applied. It reached a top around mid-June to 1.43, before decreasing again and reaching a plateau between 1 and 1.4 for more than two months, even after masks became mandatory in public transport. 
+September 18, 2020 marked the beginning of the second wave, with the confidence intervals for the first derivative excluding the value 0. The estimates for $R_t$ during the first half of October 2020 were above 1.5, and decreased since. As of December 24, 2020, the estimates for the reproductive number are slightly above 1, but we can not exclude the threshold of 1, as the confidence bands are larger at the end due to the infected individuals that are not all reported yet. 
+The stopping of some sanitary measures had a surprising impact on the evolution of the estimated reproductive number, as in late June 2020 (shown by the vertical red dashed line), when restaurants and nightclubs were no longer constrained to close between midnight and 6 a.m. [[FOPH]](https://www.covid19.admin.ch/en/overview). Similarly, the increase from mid-September to October was not due to the lifting of a sanitary measure, but correlates with the resumption of classes and teaching in schools. Measures imposed on October 19, 2020 had a clear impact on the estimated reproductive number, accelerating its decrease, with an estimated first derivative being well below the threshold 0. 
