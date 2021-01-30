@@ -20,7 +20,7 @@ In the Code folder, you will find the following files:
 
 ## Shiny App
 
-A [Shiny App](https://antoinestats.shinyapps.io/ShinyAppCOVID19/) was also developped to estimate the true incidence curve and the reproductive number online, for some available countries. This app allows the user to change the incubation period and generation intervals, as well as some settings of the used methods.
+A [Shiny App](https://antoinestats.shinyapps.io/ShinyAppCOVID19/) was also developped to estimate the true incidence curve and the reproductive number online, for some available countries. This app allows the user to change the incubation period and generation intervals, as well as some settings of the methods used.
 Here are some pictures of the app in action.
 
 <p align="center">
