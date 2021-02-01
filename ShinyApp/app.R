@@ -2137,6 +2137,20 @@ dbBody <- dashboardBody(
   #   # background-image: url(https://www.pngfind.com/pngs/m/461-4619276_hello-lettering-hd-png-download.png);
   # ),
   
+  tags$head(tags$script('
+                              var dimension = [0, 0];
+                        $(document).on("shiny:connected", function(e) {
+                        dimension[0] = window.innerWidth;
+                        dimension[1] = window.innerHeight;
+                        Shiny.onInputChange("dimension", dimension);
+                        });
+                        $(window).resize(function(e) {
+                        dimension[0] = window.innerWidth;
+                        dimension[1] = window.innerHeight;
+                        Shiny.onInputChange("dimension", dimension);
+                        });
+                        ')),
+  
   withSpinner(
   tabItems(
     tabItem(tabName = "EstimatingR",
@@ -2222,6 +2236,8 @@ dbBody <- dashboardBody(
                                   "quasi-Poisson" = "quasipoisson",
                                   "Negative binomial" = "negbin"),
                                 selected = "negbin"),
+                    # bsTooltip("family_estim", "The wait times will be broken into this many equally spaced bins",
+                    #            "top"),
                     
                     conditionalPanel(
                       condition = "input.useBasisDim==1",
@@ -2271,14 +2287,15 @@ rightsidebar = rightSidebar(
     id  = "rightSideBarSettings",
     icon = NULL,
     active = TRUE,
-    title = "Super settings"
+    title = "Settings"
 
     ,
     # checkboxInput(inputId = "useBasisDim", label = "Use basis dimension", value = FALSE)
+    HTML("<br>"),
     
     materialSwitch(inputId = "NightMode", label = "Night Mode", status = "danger", value = FALSE, right = TRUE)
     ,HTML("<br>")
-    
+
     ,materialSwitch(inputId = "useBasisDim", label = "Use basis dimension", status = "danger", value = FALSE, right = TRUE)
     ,HTML("<br>")
     ,materialSwitch(inputId = "Show_deriv", label = "Show derivative", status = "danger", value = TRUE, right = TRUE)
@@ -2289,13 +2306,27 @@ rightsidebar = rightSidebar(
     #             min = 1, max = 50,
     #             value = 20)
     ,HTML("<br>")
-    ,selectInput("weights", "Weights:", c("No weight", "1/var", "estimate/var", "sqrt(estimate)/var"), selected = "sqrt(estimate)/var")
+    # ,HTML("You can change how the uncertainty from the deconvolution is used for estimating the reproductive number. Usually, the setting '1/var' is used, so that
+    #       the weight of the observation is inversely proportional to its variance. When using families that allow for overdispersion (like quasi-Poisson and negative binomial),
+    #       balancing the weight by the estimates (or their square root) helps not to penalize too much values estimated during critical phases of the epidemic (when there are
+    #       a large number of new cases for example).")
+    ,selectInput("weights", "Weights of the estimated incidence cases:", c("No weight", "1/var", "sqrt(estimate)/var", "estimate/var"), selected = "sqrt(estimate)/var")
+    ,bsTooltip("weights",
+               "You can change how the uncertainty from the deconvolution is used for estimating the reproductive number. Usually, the setting '1/var' is used, so that
+          the weight of the observation is inversely proportional to its variance. When using families that allow for overdispersion (like quasi-Poisson and negative binomial),
+               balancing the weight by the estimates (or their square root) helps not to penalize too much values estimated during critical phases of the epidemic (when there are
+               a large number of new cases for example).",
+               "bottom")
+    ,uiOutput("tooltip_test")
+    
     ,HTML("<br>")
+    ,HTML("<left>To estimate the best basis dimension (or the frequency for the spline parameters) and regularization parameter:</left>")
+    ,HTML("<br><br>")
     ,column(width = 12,
             actionButton(inputId = "EstimateDimAndRegularization",
                           label = "Choose best",
                           icon = icon("rocket"),
-                          width = NULL,
+                          width = NULL
                     )
             ,align = "center"
     )
@@ -2315,6 +2346,28 @@ ui <- shinyUI(dashboardPagePlus(
 # ------------ Server ------------
 
 server <- shinyServer(function(input, output, session) {
+  
+  observe({
+    # print(paste(input$dimension[1], input$dimension[2], input$dimension[2]/input$dimension[1]))
+    result = tryCatch({
+      if (input$dimension[1] > 760){
+        shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'hidden';")
+      }else{
+        shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'visible';")
+      }
+    }, warning = function(warning_condition) {
+    }, error = function(error_condition) {
+    }, finally={
+    })
+  })
+  
+  observeEvent(input$sideBarContent, {
+    if (input$sideBarContent == "EstimatingR"){
+      shinyjs::runjs("document.getElementsByClassName('fa fa-gears')[0].style.visibility = 'visible';")
+    }else{
+      shinyjs::runjs("document.getElementsByClassName('fa fa-gears')[0].style.visibility = 'hidden';")
+    }
+  })
   
   # ----------------- TO BE REMOVED: test deconnection ------------- 
   observeEvent(input$disconnect, {
@@ -2426,13 +2479,13 @@ server <- shinyServer(function(input, output, session) {
   
   # ============================ side bar and header ============================
   # Hide sidebar
-  shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'hidden';")
-  observeEvent(input$hide,{
-    shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'hidden';")
-  })
-  observeEvent(input$show,{
-    shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'visible';")
-  })
+  # shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'hidden';")
+  # observeEvent(input$hide,{
+  #   shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'hidden';")
+  # })
+  # observeEvent(input$show,{
+  #   shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'visible';")
+  # })
   
   # When the 'Estimating R' tab is selected (left side bar), add inputs for data and results below
   output$contentSelectedTabSideBar <- renderUI({
@@ -2486,6 +2539,8 @@ server <- shinyServer(function(input, output, session) {
         ,fluidRow(id = "Results", inputId = "Results",
                   HTML("<br>"),
                   HTML('<center>Results</center>','<p style="color:black"></p>'),
+                  tags$div(id='resultsdiv',
+                           class='resultsdiv_class',
                   sliderInput("resultInterestDate", "Date of interest:",
                               min = as.Date("2020-01-01"), max = Sys.Date(), value = Sys.Date() - 10)
                   ,column(width = 12,
@@ -2497,6 +2552,7 @@ server <- shinyServer(function(input, output, session) {
                   ,HTML("<br>")
                   ,download_button
                   ,HTML("<br>")
+                  )
         )
         ,HTML("<br><br>")
         ,align="center"
