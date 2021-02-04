@@ -2076,12 +2076,16 @@ customLogo <- shinyDashboardLogoDIY(
 )
 dbHeader <- dashboardHeaderPlus(title = customLogo, titleWidth = 350, enable_rightsidebar = TRUE
                                 # ,left_menu = tagList(
-                                #   actionButton(
-                                #     inputId = "help",
-                                #     label = "",
-                                #     icon = icon("info"),
-                                #     width = NULL
-                                #   )
+                                #   # actionButton(
+                                #   #   inputId = "disconnect",
+                                #   #   label = "",
+                                #   #   icon = icon("info"),
+                                #   #   width = NULL
+                                #   # ),
+                                #   actionButton(inputId='githublink', label="", 
+                                #                icon = icon("github"), 
+                                #                onclick = "window.open('https://github.com/EPFL-STAT-COVID-Student-Projects/EstimatingRWithSplines', '_blank')")
+                                # 
                                 # )
                                 )
 
@@ -2093,11 +2097,16 @@ dbSidebar <- dashboardSidebar(
   width = 350,
   sidebarMenu(
     chooseSliderSkin("Square", color = "#112446"),
-    HTML('<center><img src="covid.png", height="100px", style="float:center"/></center>','<p style="color:black"></p>'),
+    # HTML('<center><img src="covid.png", height="100px", style="float:center"/></center>','<p style="color:black"></p>'),
+    
+    tags$a(HTML('<center><img src="covid.png", height="100px", style="float:center"/></center>','<p style="color:black"></p>'),
+           href="https://github.com/EPFL-STAT-COVID-Student-Projects/EstimatingRWithSplines"),
+    
     HTML("<br>"),
     menuItem("Welcome", tabName = "Description", icon = icon("home")) %>% add_class("Description"),
     menuItem("Estimating R", tabName = "EstimatingR", icon = icon("dashboard")) %>% add_class("EstimatingR"),
     menuItem("More about the method", tabName = "More", icon = icon("info-circle")) %>% add_class("More"),
+    # menuItem("GitHub repository", icon = icon("github"), href = "https://github.com/EPFL-STAT-COVID-Student-Projects/EstimatingRWithSplines") %>% add_class("githubRepo"),
 
     HTML("<br>")
     
@@ -2117,15 +2126,15 @@ dbBody <- dashboardBody(
   disconnectMessage(
     text = "Something went wrong! Try refreshing the page.",
     refresh = "Refresh",
-    background = "rgba(225, 71, 54, 100)",
+    background = "rgba(0, 0, 0, 1)", #"rgba(225, 71, 54, 100)"
     colour = "#FFFFFF",
     refreshColour = "#337AB7",
-    overlayColour = "rgba(225, 71, 54, 0.2)",
-    overlayOpacity = 0.3,
+    overlayColour = "rgba(0, 0, 0, 1)",
+    overlayOpacity = 1,
     width = 450,
     top = "center",
     size = 24,
-    css = "padding: 15px !important; box-shadow: none !important; background: rgba(199, 59, 89, 0.2);"
+    css = "padding: 15px !important; box-shadow: none !important; background: rgba(0, 0, 0, 1);"
   ),
   
   # tags$head(
@@ -2178,7 +2187,7 @@ dbBody <- dashboardBody(
                 collapsible = TRUE,
                 enable_sidebar = TRUE,
                 sidebar_width = 35,
-                sidebar_start_open = TRUE,
+                sidebar_start_open = FALSE,
                 id = "DeconvBox",
 
                 sidebar_content = tagList(
@@ -2222,7 +2231,7 @@ dbBody <- dashboardBody(
                 collapsible = TRUE,
                 enable_sidebar = TRUE,
                 sidebar_width = 35,
-                sidebar_start_open = TRUE,
+                sidebar_start_open = FALSE,
                 id = "EstimBox",
 
                 sidebar_content = tagList(
@@ -2347,6 +2356,21 @@ ui <- shinyUI(dashboardPagePlus(
 
 server <- shinyServer(function(input, output, session) {
   
+  # ============================ Load all 3 datasets ============================
+  DATASETS <- list("OFSP" = NULL, "OurWorldinData" = NULL, "HDX" = NULL)
+  
+  DATASETS$OFSP <- read.xlsx(sep=",",startRow = 8, detectDates = TRUE,
+                    "https://www.bag.admin.ch/dam/bag/de/dokumente/mt/k-und-i/aktuelle-ausbrueche-pandemien/2019-nCoV/covid-19-datengrundlage-lagebericht.xlsx.download.xlsx/200325_Datengrundlage_Grafiken_COVID-19-Bericht.xlsx")
+  names(DATASETS$OFSP) <- c("date","cases","casesCumul","hospitalized","hospitalizedCumul",
+                   "deaths","deathsCumul")
+  
+  DATASETS$OurWorldinData <- as.data.frame(read_csv("https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/owid-covid-data.csv"))
+  
+  DATASETS$HDX <- as.data.frame(read_csv(file = "https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_confirmed_global.csv&filename=time_series_covid19_confirmed_global.csv"))
+
+  
+  
+  # ============================ toggle side bar ============================
   observe({
     # print(paste(input$dimension[1], input$dimension[2], input$dimension[2]/input$dimension[1]))
     result = tryCatch({
@@ -2368,6 +2392,8 @@ server <- shinyServer(function(input, output, session) {
       shinyjs::runjs("document.getElementsByClassName('fa fa-gears')[0].style.visibility = 'hidden';")
     }
   })
+  
+  
   
   # ----------------- TO BE REMOVED: test deconnection ------------- 
   observeEvent(input$disconnect, {
@@ -2487,15 +2513,16 @@ server <- shinyServer(function(input, output, session) {
   #   shinyjs::runjs("document.getElementsByClassName('sidebar-toggle')[0].style.visibility = 'visible';")
   # })
   
-  # When the 'Estimating R' tab is selected (left side bar), add inputs for data and results below
-  output$contentSelectedTabSideBar <- renderUI({
+  sidebarcontent <- reactiveValues("content" = NULL)
+  
+  observeEvent(input$sideBarContent, {
     if (input$sideBarContent == "EstimatingR"){
       if (!is.null(Deconvolution_List$body)){
         download_button <- downloadButton('downloadData', '')
       }else{
         download_button <- HTML("<br>")
       }
-      fluidRow(
+      sidebarcontent$content <- fluidRow(
         HTML("<br>"),
         fluidRow(id = "sidebarsettings", inputId = "sidebarsettings",
                  HTML("<br>"),
@@ -2541,24 +2568,32 @@ server <- shinyServer(function(input, output, session) {
                   HTML('<center>Results</center>','<p style="color:black"></p>'),
                   tags$div(id='resultsdiv',
                            class='resultsdiv_class',
-                  sliderInput("resultInterestDate", "Date of interest:",
-                              min = as.Date("2020-01-01"), max = Sys.Date(), value = Sys.Date() - 10)
-                  ,column(width = 12,
-                          # uiOutput("dynamic"),
-                          tableOutput("dynamic"),
-                          align = "center")
-                  #,uiOutput("dynamic")
-                  
-                  ,HTML("<br>")
-                  ,download_button
-                  ,HTML("<br>")
+                           sliderInput("resultInterestDate", "Date of interest:",
+                                       min = as.Date("2020-01-01"), max = Sys.Date(), value = Sys.Date() - 10)
+                           ,column(width = 12,
+                                   # uiOutput("dynamic"),
+                                   tableOutput("dynamic"),
+                                   align = "center")
+                           #,uiOutput("dynamic")
+                           
+                           ,HTML("<br>")
+                           ,download_button
+                           ,HTML("<br>")
                   )
         )
         ,HTML("<br><br>")
         ,align="center"
       )
-
+      
+    }else{
+      sidebarcontent$content <- fluidRow(id = "sidebarsettings", inputId = "sidebarsettings",
+               HTML("<br>"))
     }
+  })
+  
+  # When the 'Estimating R' tab is selected (left side bar), add inputs for data and results below
+  output$contentSelectedTabSideBar <- renderUI({
+    sidebarcontent$content
   })
   
   # Update source input when country is changed
@@ -2823,20 +2858,31 @@ server <- shinyServer(function(input, output, session) {
       # Need to retreive the data 
       SourceData <<- params$source
       
+      # if (SourceData == "OFSP"){
+      #   data <- read.xlsx(sep=",",startRow = 8, detectDates = TRUE,
+      #                     "https://www.bag.admin.ch/dam/bag/de/dokumente/mt/k-und-i/aktuelle-ausbrueche-pandemien/2019-nCoV/covid-19-datengrundlage-lagebericht.xlsx.download.xlsx/200325_Datengrundlage_Grafiken_COVID-19-Bericht.xlsx")
+      #   names(data) <- c("date","cases","casesCumul","hospitalized","hospitalizedCumul",
+      #                    "deaths","deathsCumul")
+      #   DataAllCountries <<- data
+      #   
+      # }else if (SourceData == "Our World in Data"){
+      #   data <- as.data.frame(read_csv("https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/owid-covid-data.csv"))
+      #   DataAllCountries <<- data
+      #   
+      # }else if (SourceData == "HDX"){
+      #   DataAllCountries <<- as.data.frame(read_csv(file = "https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_confirmed_global.csv&filename=time_series_covid19_confirmed_global.csv"))
+      #   
+      # }else{
+      #   # handle this situation....
+      # }
       if (SourceData == "OFSP"){
-        data <- read.xlsx(sep=",",startRow = 8, detectDates = TRUE,
-                          "https://www.bag.admin.ch/dam/bag/de/dokumente/mt/k-und-i/aktuelle-ausbrueche-pandemien/2019-nCoV/covid-19-datengrundlage-lagebericht.xlsx.download.xlsx/200325_Datengrundlage_Grafiken_COVID-19-Bericht.xlsx")
-        names(data) <- c("date","cases","casesCumul","hospitalized","hospitalizedCumul",
-                         "deaths","deathsCumul")
-        DataAllCountries <<- data
-        
+        DataAllCountries <<- DATASETS$OFSP
+
       }else if (SourceData == "Our World in Data"){
-        data <- as.data.frame(read_csv("https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/owid-covid-data.csv"))
-        DataAllCountries <<- data
-        
+        DataAllCountries <<- DATASETS$OurWorldinData
+
       }else if (SourceData == "HDX"){
-        DataAllCountries <<- as.data.frame(read_csv(file = "https://data.humdata.org/hxlproxy/api/data-preview.csv?url=https%3A%2F%2Fraw.githubusercontent.com%2FCSSEGISandData%2FCOVID-19%2Fmaster%2Fcsse_covid_19_data%2Fcsse_covid_19_time_series%2Ftime_series_covid19_confirmed_global.csv&filename=time_series_covid19_confirmed_global.csv"))
-        
+        DataAllCountries <<- DATASETS$HDX
       }else{
         # handle this situation....
       }
@@ -3408,7 +3454,14 @@ server <- shinyServer(function(input, output, session) {
                         be explicitly computed, and the only unknown is the log of the reproductive number. In order to estimate this, we suppose 
                         that \\(\\log(R_t)\\) is smoothed over the time, that is, $$ \\log(R_t) = \\sum_{i = 1}^{q_1}\\beta_j B_j(t), $$
                         where \\(B = \\{B_1,\\ldots,B_{q_1}\\}\\) is a spline basis of dimension \\(q_1\\), 
-                        defined over the interval \\([0, T]\\). <br/> <br/><br/> <br/><br/> <br/>")
+                        defined over the interval \\([0, T]\\). <br/><br/>"),
+      
+      h4(HTML("More about this project <br/>")),
+      HTML("If you would like to know more about how these methods were implemented, we suggest you visit the GitHub page for this project. 
+           You will find the implementation in R as well as an analysis of the evolution of the reproductive number in Switzerland."),
+      tags$a(href="https://github.com/EPFL-STAT-COVID-Student-Projects/EstimatingRWithSplines", "Click here!"),
+      
+      HTML("<br/><br/><br/><br/>")
    
       # textFunctionTheme(dark_theme,'Let \\( y_1, \\ldots, y_n \\) be the observed events (for example the new number of cases per day). The Cori et. al estimation for \\( R_t \\) 
       #                   (the reproductive number) is as follows: $$ R_t = \\frac{y_t}{\\sum{w_s y_{t-s}}}. $$ However, it assumes that the observed events \\( y_t \\)
